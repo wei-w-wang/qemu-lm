@@ -32,15 +32,6 @@
 
 #define BALLOON_PAGE_SIZE  (1 << VIRTIO_BALLOON_PFN_SHIFT)
 
-static void balloon_page(void *addr, int deflate)
-{
-    if (!qemu_balloon_is_inhibited() && (!kvm_enabled() ||
-                                         kvm_has_sync_mmu())) {
-        qemu_madvise(addr, BALLOON_PAGE_SIZE,
-                deflate ? QEMU_MADV_WILLNEED : QEMU_MADV_DONTNEED);
-    }
-}
-
 static const char *balloon_stat_names[] = {
    [VIRTIO_BALLOON_S_SWAP_IN] = "stat-swap-in",
    [VIRTIO_BALLOON_S_SWAP_OUT] = "stat-swap-out",
@@ -70,6 +61,13 @@ static bool balloon_stats_supported(const VirtIOBalloon *s)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
     return virtio_vdev_has_feature(vdev, VIRTIO_BALLOON_F_STATS_VQ);
+}
+
+static bool balloon_sg_supported(const VirtIOBalloon *s)
+{
+    VirtIODevice *vdev = VIRTIO_DEVICE(s);
+
+    return virtio_vdev_has_feature(vdev, VIRTIO_BALLOON_F_SG);
 }
 
 static bool balloon_stats_enabled(const VirtIOBalloon *s)
@@ -204,11 +202,43 @@ static void balloon_stats_set_poll_interval(Object *obj, Visitor *v,
     balloon_stats_change_timer(s, 0);
 }
 
+static void balloon_pages(ram_addr_t addr, ram_addr_t size, bool deflate)
+{
+    void *ptr;
+    size_t len;
+    MemoryRegionSection section = {.mr = NULL};
+
+    if (qemu_balloon_is_inhibited() ||
+        (kvm_enabled() && !kvm_has_sync_mmu()))
+        return;
+
+    while (size > 0) {
+        section = memory_region_find(get_system_memory(), addr, size);
+        if (!section.mr || !int128_nz(section.size) ||
+            !memory_region_is_ram(section.mr) ||
+            memory_region_is_rom(section.mr) ||
+            memory_region_is_romd(section.mr)){
+            trace_virtio_balloon_bad_addr(addr);
+            fprintf(stderr, "%s: Invalid RAM range [%lx, %lx]\n",
+                                                  __func__, addr, addr + size);
+            return;
+        }
+        ptr = memory_region_get_ram_ptr(section.mr) +
+              section.offset_within_region;
+        len = (size_t)int128_get64(section.size);
+        qemu_madvise(ptr, len,
+                     deflate ? QEMU_MADV_WILLNEED : QEMU_MADV_DONTNEED);
+        size -= len;
+        addr += len;
+    }
+    memory_region_unref(section.mr);
+}
+
 static void virtio_balloon_handle_output(VirtIODevice *vdev, VirtQueue *vq)
 {
     VirtIOBalloon *s = VIRTIO_BALLOON(vdev);
     VirtQueueElement *elem;
-    MemoryRegionSection section;
+    ram_addr_t addr;
 
     for (;;) {
         size_t offset = 0;
@@ -218,32 +248,22 @@ static void virtio_balloon_handle_output(VirtIODevice *vdev, VirtQueue *vq)
             return;
         }
 
-        while (iov_to_buf(elem->out_sg, elem->out_num, offset, &pfn, 4) == 4) {
-            ram_addr_t pa;
-            ram_addr_t addr;
-            int p = virtio_ldl_p(vdev, &pfn);
+        if (balloon_sg_supported(s)) {
+            size_t size, i;
 
-            pa = (ram_addr_t) p << VIRTIO_BALLOON_PFN_SHIFT;
-            offset += 4;
-
-            /* FIXME: remove get_system_memory(), but how? */
-            section = memory_region_find(get_system_memory(), pa, 1);
-            if (!int128_nz(section.size) ||
-                !memory_region_is_ram(section.mr) ||
-                memory_region_is_rom(section.mr) ||
-                memory_region_is_romd(section.mr)) {
-                trace_virtio_balloon_bad_addr(pa);
-                continue;
+            for (i = 0; i < elem->in_num; i++) {
+                addr = elem->in_addr[i];
+                size = elem->in_sg[i].iov_len;
+                balloon_pages(addr, size, !!(vq == s->dvq));
             }
+        } else {
+            while (iov_to_buf(elem->out_sg, elem->out_num, offset, &pfn, 4) == 4) {
+                int p = virtio_ldl_p(vdev, &pfn);
 
-            trace_virtio_balloon_handle_output(memory_region_name(section.mr),
-                                               pa);
-            /* Using memory_region_get_ram_ptr is bending the rules a bit, but
-               should be OK because we only want a single page.  */
-            addr = section.offset_within_region;
-            balloon_page(memory_region_get_ram_ptr(section.mr) + addr,
-                         !!(vq == s->dvq));
-            memory_region_unref(section.mr);
+                addr = (ram_addr_t) p << VIRTIO_BALLOON_PFN_SHIFT;
+                balloon_pages(addr, BALLOON_PAGE_SIZE, !!(vq == s->dvq));
+                offset += 4;
+            }
         }
 
         virtqueue_push(vq, elem, offset);
@@ -505,6 +525,8 @@ static const VMStateDescription vmstate_virtio_balloon = {
 static Property virtio_balloon_properties[] = {
     DEFINE_PROP_BIT("deflate-on-oom", VirtIOBalloon, host_features,
                     VIRTIO_BALLOON_F_DEFLATE_ON_OOM, false),
+    DEFINE_PROP_BIT("balloon-sg", VirtIOBalloon, host_features,
+                    VIRTIO_BALLOON_F_SG, true),
     DEFINE_PROP_END_OF_LIST(),
 };
 
