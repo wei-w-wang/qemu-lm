@@ -36,6 +36,9 @@
 
 static QEMUBalloonEvent *balloon_event_fn;
 static QEMUBalloonStatus *balloon_stat_fn;
+static QEMUBalloonFreePageSupport *balloon_free_page_support_fn;
+static QEMUBalloonFreePageReport *balloon_free_page_report_fn;
+static QEMUBalloonFreePageReady *balloon_free_page_ready_fn;
 static void *balloon_opaque;
 static bool balloon_inhibited;
 
@@ -64,17 +67,45 @@ static bool have_balloon(Error **errp)
     return true;
 }
 
-int qemu_add_balloon_handler(QEMUBalloonEvent *event_func,
-                             QEMUBalloonStatus *stat_func, void *opaque)
+bool balloon_free_page_support(void)
 {
-    if (balloon_event_fn || balloon_stat_fn || balloon_opaque) {
-        /* We're already registered one balloon handler.  How many can
-         * a guest really have?
-         */
+    return balloon_free_page_support_fn &&
+           balloon_free_page_support_fn(balloon_opaque);
+}
+
+int balloon_free_page_report(void)
+{
+    if (!balloon_free_page_report_fn) {
         return -1;
     }
-    balloon_event_fn = event_func;
-    balloon_stat_fn = stat_func;
+
+    return balloon_free_page_report_fn(balloon_opaque);
+}
+
+bool balloon_free_page_ready(void)
+{
+    return balloon_free_page_ready_fn(balloon_opaque);
+}
+
+int qemu_add_balloon_handler(QEMUBalloonEvent *event_fn,
+                             QEMUBalloonStatus *stat_fn,
+                             QEMUBalloonFreePageSupport *free_page_support_fn,
+                             QEMUBalloonFreePageReport *free_page_report_fn,
+                             QEMUBalloonFreePageReady *free_page_ready_fn,
+                             void *opaque)
+{
+    if (balloon_event_fn || balloon_stat_fn || balloon_free_page_support_fn ||
+        balloon_free_page_report_fn || balloon_free_page_ready_fn ||
+        balloon_opaque) {
+        /* We already registered one balloon handler. */
+        return -1;
+    }
+
+    balloon_event_fn = event_fn;
+    balloon_stat_fn = stat_fn;
+    balloon_free_page_support_fn = free_page_support_fn;
+    balloon_free_page_report_fn = free_page_report_fn;
+    balloon_free_page_ready_fn = free_page_ready_fn;
     balloon_opaque = opaque;
     return 0;
 }
@@ -86,6 +117,9 @@ void qemu_remove_balloon_handler(void *opaque)
     }
     balloon_event_fn = NULL;
     balloon_stat_fn = NULL;
+    balloon_free_page_support_fn = NULL;
+    balloon_free_page_report_fn = NULL;
+    balloon_free_page_ready_fn = NULL;
     balloon_opaque = NULL;
 }
 
