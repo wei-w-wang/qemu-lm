@@ -191,8 +191,10 @@ struct RAMState {
     uint64_t iterations;
     /* number of dirty bits in the bitmap */
     uint64_t migration_dirty_pages;
+    /* The feature, skip transfering of free pages, is supported */
+    bool free_page_support;
     /* Skip the transfer of free pages in the bulk stage */
-    bool skip_free_page;
+    bool free_page_done;
     /* protects modification of the bitmap */
     QemuMutex bitmap_mutex;
     /* The RAMBlock used in the last src_page_requests */
@@ -540,9 +542,8 @@ unsigned long migration_bitmap_find_dirty(RAMState *rs, RAMBlock *rb,
     unsigned long *bitmap = rb->bmap;
     unsigned long next;
 
-    if (rs->ram_bulk_stage && start > 0 && !rs->skip_free_page) {
+    if (rs->ram_bulk_stage && start > 0 && !rs->free_page_support) {
         next = start + 1;
-        qemu_log("%s called:..1 \n", __func__);
     } else {
         next = find_next_bit(bitmap, size, start);
     }
@@ -1406,7 +1407,8 @@ static void ram_state_reset(RAMState *rs)
     rs->last_page = 0;
     rs->last_version = ram_list.version;
     rs->ram_bulk_stage = true;
-    rs->skip_free_page = false;
+    rs->free_page_support = balloon_free_page_support();
+    rs->free_page_done = false;
 }
 
 #define MAX_WAIT 50 /* ms, half buffered_file limit */
@@ -1856,9 +1858,6 @@ static int ram_state_init(RAMState **rsp)
     rcu_read_lock();
     ram_state_reset(*rsp);
 
-    if (balloon_free_page_support())
-        ram_state->skip_free_page = true;
-
     /* Skip setting bitmap if there is no RAM */
     if (ram_bytes_total()) {
         RAMBlock *block;
@@ -1867,7 +1866,7 @@ static int ram_state_init(RAMState **rsp)
             unsigned long pages = block->max_length >> TARGET_PAGE_BITS;
 
             block->bmap = bitmap_new(pages);
-            if ((*rsp)->skip_free_page) {
+            if ((*rsp)->free_page_support) {
                 bitmap_set(block->bmap, 1, pages);
             } else {
                 bitmap_set(block->bmap, 0, pages);
@@ -1879,9 +1878,6 @@ static int ram_state_init(RAMState **rsp)
         }
     }
 
-    if (ram_state->skip_free_page)
-        balloon_free_page_report();
-
     /*
      * Count the total number of pages used by ram blocks not including any
      * gaps due to alignment or unplugs.
@@ -1889,6 +1885,9 @@ static int ram_state_init(RAMState **rsp)
     (*rsp)->migration_dirty_pages = ram_bytes_total() >> TARGET_PAGE_BITS;
 
     memory_global_dirty_log_start();
+    if ((*rsp)->free_page_support) {
+        balloon_free_page_start();
+    }
     migration_bitmap_sync(*rsp);
     qemu_mutex_unlock_ramlist();
     qemu_mutex_unlock_iothread();
@@ -1986,9 +1985,10 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 
     ram_control_before_iterate(f, RAM_CONTROL_ROUND);
 
-    while (rs->ram_bulk_stage && !(ret = balloon_free_page_ready())) {
-       qemu_log("%s called: rs->ram_bulk_stage=%d, ret=%d \n", __func__, rs->ram_bulk_stage, ret);
-    };
+    if (rs->free_page_support && !rs->free_page_done) {
+        balloon_free_page_stop();
+        rs->free_page_done = true;
+    }
 
     t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     i = 0;

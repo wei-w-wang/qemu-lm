@@ -35,7 +35,7 @@
 #define VIRTIO_BALLOON_F_STATS_VQ	1 /* Memory Stats virtqueue */
 #define VIRTIO_BALLOON_F_DEFLATE_ON_OOM	2 /* Deflate balloon on OOM */
 #define VIRTIO_BALLOON_F_SG		3 /* Use sg instead of PFN lists */
-#define VIRTIO_BALLOON_F_FREE_PAGE_VQ   4 /* Virtqueue to report free pages */
+#define VIRTIO_BALLOON_F_CTRL_VQ	4 /* Control Virtqueue */
 
 /* Size of a PFN in the balloon interface. */
 #define VIRTIO_BALLOON_PFN_SHIFT 12
@@ -83,5 +83,20 @@ struct virtio_balloon_stat {
 	__virtio16 tag;
 	__virtio64 val;
 } QEMU_PACKED;
+
+enum {
+    VIRTIO_BALLOON_CTRLQ_CLASS_FREE_PAGE = 0,
+    CTRLQ_CLASS_MAX,
+};
+
+struct virtio_balloon_ctrlq_cmd {
+#define VIRTIO_BALLOON_CTRLQ_F_FREE_PAGE 0
+	__virtio32 class;
+	__virtio32 cmd;
+};
+
+/* Ctrlq commands related to free page report */
+#define VIRTIO_BALLOON_FREE_PAGE_F_STOP		0
+#define VIRTIO_BALLOON_FREE_PAGE_F_START	1
 
 #endif /* _LINUX_VIRTIO_BALLOON_H */

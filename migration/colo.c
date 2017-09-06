@@ -32,7 +32,7 @@ static bool vmstate_loading;
 bool migration_in_colo_state(void)
 {
     MigrationState *s = migrate_get_current();
-
+qemu_log("%s called:..s->state=%d \n", __func__, s->state);
     return (s->state == MIGRATION_STATUS_COLO);
 }
 

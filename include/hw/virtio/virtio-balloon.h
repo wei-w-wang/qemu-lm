@@ -33,19 +33,18 @@ typedef struct virtio_balloon_stat_modern {
 
 typedef struct VirtIOBalloon {
     VirtIODevice parent_obj;
-    VirtQueue *ivq, *dvq, *svq, *free_page_vq;
+    VirtQueue *ivq, *dvq, *svq, *ctrlq, *free_page_vq;
     uint32_t num_pages;
     uint32_t actual;
     uint64_t stats[VIRTIO_BALLOON_S_NR];
-    unsigned long *free_page_bmap;
     VirtQueueElement *stats_vq_elem;
-    VirtQueueElement *free_page_vq_elem;
+    VirtQueueElement *free_page_elem;
     size_t stats_vq_offset;
     QEMUTimer *stats_timer;
     int64_t stats_last_update;
     int64_t stats_poll_interval;
     uint32_t host_features;
-    bool free_page_ready;
+    bool free_page_stop;
 } VirtIOBalloon;
 
 #endif

@@ -37,8 +37,8 @@
 static QEMUBalloonEvent *balloon_event_fn;
 static QEMUBalloonStatus *balloon_stat_fn;
 static QEMUBalloonFreePageSupport *balloon_free_page_support_fn;
-static QEMUBalloonFreePageReport *balloon_free_page_report_fn;
-static QEMUBalloonFreePageReady *balloon_free_page_ready_fn;
+static QEMUBalloonFreePageStart *balloon_free_page_start_fn;
+static QEMUBalloonFreePageStop *balloon_free_page_stop_fn;
 static void *balloon_opaque;
 static bool balloon_inhibited;
 
@@ -73,29 +73,29 @@ bool balloon_free_page_support(void)
            balloon_free_page_support_fn(balloon_opaque);
 }
 
-int balloon_free_page_report(void)
+int balloon_free_page_start(void)
 {
-    if (!balloon_free_page_report_fn) {
+    if (!balloon_free_page_start_fn) {
         return -1;
     }
 
-    return balloon_free_page_report_fn(balloon_opaque);
+    return balloon_free_page_start_fn(balloon_opaque);
 }
 
-bool balloon_free_page_ready(void)
+int balloon_free_page_stop(void)
 {
-    return balloon_free_page_ready_fn(balloon_opaque);
+    return balloon_free_page_stop_fn(balloon_opaque);
 }
 
 int qemu_add_balloon_handler(QEMUBalloonEvent *event_fn,
                              QEMUBalloonStatus *stat_fn,
                              QEMUBalloonFreePageSupport *free_page_support_fn,
-                             QEMUBalloonFreePageReport *free_page_report_fn,
-                             QEMUBalloonFreePageReady *free_page_ready_fn,
+                             QEMUBalloonFreePageStart *free_page_start_fn,
+                             QEMUBalloonFreePageStop *free_page_stop_fn,
                              void *opaque)
 {
     if (balloon_event_fn || balloon_stat_fn || balloon_free_page_support_fn ||
-        balloon_free_page_report_fn || balloon_free_page_ready_fn ||
+        balloon_free_page_start_fn || balloon_free_page_stop_fn ||
         balloon_opaque) {
         /* We already registered one balloon handler. */
         return -1;
@@ -104,8 +104,8 @@ int qemu_add_balloon_handler(QEMUBalloonEvent *event_fn,
     balloon_event_fn = event_fn;
     balloon_stat_fn = stat_fn;
     balloon_free_page_support_fn = free_page_support_fn;
-    balloon_free_page_report_fn = free_page_report_fn;
-    balloon_free_page_ready_fn = free_page_ready_fn;
+    balloon_free_page_start_fn = free_page_start_fn;
+    balloon_free_page_stop_fn = free_page_stop_fn;
     balloon_opaque = opaque;
     return 0;
 }
@@ -118,8 +118,8 @@ void qemu_remove_balloon_handler(void *opaque)
     balloon_event_fn = NULL;
     balloon_stat_fn = NULL;
     balloon_free_page_support_fn = NULL;
-    balloon_free_page_report_fn = NULL;
-    balloon_free_page_ready_fn = NULL;
+    balloon_free_page_start_fn = NULL;
+    balloon_free_page_stop_fn = NULL;
     balloon_opaque = NULL;
 }
 

@@ -75,7 +75,7 @@ static bool balloon_free_page_supported(const VirtIOBalloon *s)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
 
-    return virtio_vdev_has_feature(vdev, VIRTIO_BALLOON_F_FREE_PAGE_VQ);
+    return virtio_vdev_has_feature(vdev, VIRTIO_BALLOON_F_CTRL_VQ);
 }
 
 static bool balloon_stats_enabled(const VirtIOBalloon *s)
@@ -332,9 +332,98 @@ out:
     }
 }
 
-static void virtio_balloon_handle_free_pages(VirtIODevice *vdev, VirtQueue *vq)
+/* Guest to host control of various features */
+static void virtio_balloon_handle_ctrlq(VirtIODevice *vdev, VirtQueue *vq)
 {
     VirtIOBalloon *s = VIRTIO_BALLOON(vdev);
+    VirtQueueElement *elem;
+    struct virtio_balloon_ctrlq_cmd ctrlq_cmd;
+
+    for (;;) {
+        elem = virtqueue_pop(vq, sizeof(VirtQueueElement));
+        if (!elem) {
+            break;
+        }
+
+        /* Inbuf: fill the host-to-guest cmd buffer */
+        if (elem->in_num) {
+            iov_to_buf(elem->in_sg, elem->in_num, 0, &ctrlq_cmd,
+                       sizeof(struct virtio_balloon_ctrlq_cmd));
+            switch (ctrlq_cmd.class) {
+            case VIRTIO_BALLOON_CTRLQ_CLASS_FREE_PAGE:
+                s->free_page_elem = elem;
+            break;
+            default:
+                fprintf(stderr, "%s: Input cmd class: %d not supported\n",
+                        __func__, ctrlq_cmd.class);
+            }
+        }
+
+        /* Outbuf: handle the request from the guest */
+        if (elem->out_num) {
+           iov_to_buf(elem->out_sg, elem->out_num, 0, &ctrlq_cmd,
+                       sizeof(struct virtio_balloon_ctrlq_cmd));
+            switch (ctrlq_cmd.class) {
+            case VIRTIO_BALLOON_CTRLQ_CLASS_FREE_PAGE:
+                /* The driver has reported all the free pages */
+                if (ctrlq_cmd.cmd == VIRTIO_BALLOON_FREE_PAGE_F_STOP)
+                    s->free_page_stop = true;
+                break;
+            default:
+                fprintf(stderr, "%s: Output cmd class: %d not supported\n",
+                        __func__, ctrlq_cmd.class);
+            }
+            virtqueue_push(s->ctrlq, elem,
+                           sizeof(struct virtio_balloon_ctrlq_cmd));
+            virtio_notify(vdev, s->ctrlq);
+        }
+    }
+}
+
+/* Host to guest control of the free page report work */
+static int virtio_balloon_ctrlq_free_page(VirtIOBalloon *s, uint32_t cmd)
+{
+    VirtIODevice *vdev = VIRTIO_DEVICE(s);
+    struct virtio_balloon_ctrlq_cmd ctrlq_cmd = {
+        .class = VIRTIO_BALLOON_CTRLQ_CLASS_FREE_PAGE,
+        .cmd = cmd,
+    };
+
+    if (cmd == VIRTIO_BALLOON_FREE_PAGE_F_STOP) {
+        if (s->free_page_stop) {
+             return 0;
+        } else {
+             while(!s->free_page_stop);
+             return 0;
+        }
+    }
+
+    if (!balloon_free_page_supported(s)) {
+        return -1;
+    }
+
+    /* FIXME: Maybe this is not necessary - just return -1 */
+    if (!s->free_page_elem) {
+            fprintf(stderr, "%s: free_page_elem is NULL\n", __func__);
+            return -1;
+    }
+
+    iov_from_buf(s->free_page_elem->in_sg, s->free_page_elem->in_num, 0,
+                 &ctrlq_cmd, sizeof(struct virtio_balloon_ctrlq_cmd));
+    virtqueue_push(s->ctrlq, s->free_page_elem, sizeof(struct virtio_balloon_ctrlq_cmd));
+    virtio_notify(vdev, s->ctrlq);
+    g_free(s->free_page_elem);
+    s->free_page_elem = NULL;
+    if (cmd == VIRTIO_BALLOON_FREE_PAGE_F_STOP)
+        s->free_page_stop = true;
+    else
+        s->free_page_stop = false;
+
+    return 0;
+}
+
+static void virtio_balloon_handle_free_pages(VirtIODevice *vdev, VirtQueue *vq)
+{
     VirtQueueElement *elem;
     uint32_t flag, size;
 
@@ -345,11 +434,7 @@ static void virtio_balloon_handle_free_pages(VirtIODevice *vdev, VirtQueue *vq)
         }
 
         if (elem->out_num) {
-            if (!s->free_page_vq_elem) {
-                s->free_page_vq_elem = elem;
-            }
-            s->free_page_ready = true;
-            qemu_log("%s called:..2 \n", __func__);
+            fprintf(stderr, "%s: This vq should not have outbuf\n", __func__);
          }
 
 	if (elem->in_num) {
@@ -376,51 +461,25 @@ static bool virtio_balloon_free_page_support(void *opaque)
     }
 
     /* FIXME: Maybe this is not necessary - just return -1 */
-    if (!s->free_page_vq_elem) {
-        s->free_page_vq_elem = virtqueue_pop(s->free_page_vq,
-                                             sizeof(VirtQueueElement));
-        if (!s->free_page_vq_elem || !s->free_page_vq_elem->out_num) {
-            return false;
-        }
+    if (!s->free_page_elem) {
+             return false;
     }
 
     return true;
 }
 
-static int virtio_balloon_free_page_report(void *opaque)
+static int virtio_balloon_free_page_start(void *opaque)
 {
     VirtIOBalloon *s = opaque;
-    VirtIODevice *vdev = VIRTIO_DEVICE(s);
 
-    if (!balloon_free_page_supported(s)) {
-        return -1;
-    }
-
-    s->free_page_ready = false;
-
-    /* FIXME: Maybe this is not necessary - just return -1 */
-    if (!s->free_page_vq_elem) {
-        s->free_page_vq_elem = virtqueue_pop(s->free_page_vq,
-                                             sizeof(VirtQueueElement));
-        if (!s->free_page_vq_elem || !s->free_page_vq_elem->out_num) {
-            return -1;
-        }
-    }
-
-    /* The signal buffer size is 32-bit */
-    virtqueue_push(s->free_page_vq, s->free_page_vq_elem, sizeof(uint32_t));
-    virtio_notify(vdev, s->free_page_vq);
-    g_free(s->free_page_vq_elem);
-    s->free_page_vq_elem = NULL;
-
-    return 0;
+    return virtio_balloon_ctrlq_free_page(s, VIRTIO_BALLOON_FREE_PAGE_F_START);
 }
 
-static bool virtio_balloon_free_page_ready(void *opaque)
+static int virtio_balloon_free_page_stop(void *opaque)
 {
     VirtIOBalloon *s = opaque;
 
-    return s->free_page_ready;
+    return virtio_balloon_ctrlq_free_page(s, VIRTIO_BALLOON_FREE_PAGE_F_STOP);
 }
 
 static void virtio_balloon_get_config(VirtIODevice *vdev, uint8_t *config_data)
@@ -536,12 +595,12 @@ static void virtio_balloon_set_features(VirtIODevice *vdev, uint64_t features)
     int ret;
 
     if (!second_half) {
-        if (virtio_has_feature(features, VIRTIO_BALLOON_F_FREE_PAGE_VQ)) {
+        if (virtio_has_feature(features, VIRTIO_BALLOON_F_CTRL_VQ)) {
            ret = qemu_add_balloon_handler(virtio_balloon_to_target,
                                           virtio_balloon_stat,
                                           virtio_balloon_free_page_support,
-                                          virtio_balloon_free_page_report,
-                                          virtio_balloon_free_page_ready,
+                                          virtio_balloon_free_page_start,
+                                          virtio_balloon_free_page_stop,
                                           s);
             if (ret < 0) {
                 fprintf(stderr,"Only one balloon device is supported 1");
@@ -589,7 +648,8 @@ static void virtio_balloon_device_realize(DeviceState *dev, Error **errp)
     s->ivq = virtio_add_queue(vdev, 128, virtio_balloon_handle_output);
     s->dvq = virtio_add_queue(vdev, 128, virtio_balloon_handle_output);
     s->svq = virtio_add_queue(vdev, 128, virtio_balloon_receive_stats);
-    if (virtio_has_feature(s->host_features, VIRTIO_BALLOON_F_FREE_PAGE_VQ)) {
+    if (virtio_has_feature(s->host_features, VIRTIO_BALLOON_F_CTRL_VQ)) {
+        s->ctrlq = virtio_add_queue(vdev, 128, virtio_balloon_handle_ctrlq);
         s->free_page_vq = virtio_add_queue(vdev, 128,
                                            virtio_balloon_handle_free_pages);
     }
@@ -617,10 +677,10 @@ static void virtio_balloon_device_reset(VirtIODevice *vdev)
         s->stats_vq_elem = NULL;
     }
 
-    if (balloon_free_page_supported(s) && s->free_page_vq_elem) {
-            virtqueue_unpop(s->free_page_vq, s->free_page_vq_elem, 0);
-            g_free(s->free_page_vq_elem);
-            s->free_page_vq_elem = NULL;
+    if (balloon_free_page_supported(s) && s->free_page_elem) {
+            virtqueue_unpop(s->ctrlq, s->free_page_elem, 0);
+            g_free(s->free_page_elem);
+            s->free_page_elem = NULL;
     }
 }
 
@@ -635,13 +695,13 @@ static void virtio_balloon_set_status(VirtIODevice *vdev, uint8_t status)
              * was stopped */
             virtio_balloon_receive_stats(vdev, s->svq);
         }
-        if (balloon_free_page_supported(s) && !s->free_page_vq_elem &&
-            virtqueue_rewind(s->free_page_vq, 1)) {
+        if (balloon_free_page_supported(s) &&
+            !s->free_page_elem && virtqueue_rewind(s->ctrlq, 1)) {
             /*
-             * Poll the free page vq for the elements we have discarded when
+             * Poll the ctrl vq for the elements we have discarded when
              * the VM was stopped.
              */
-            virtio_balloon_handle_free_pages(vdev, s->free_page_vq);
+            virtio_balloon_handle_ctrlq(vdev, s->ctrlq);
         }
    }
 }
@@ -674,8 +734,8 @@ static Property virtio_balloon_properties[] = {
                     VIRTIO_BALLOON_F_DEFLATE_ON_OOM, false),
     DEFINE_PROP_BIT("balloon-sg", VirtIOBalloon, host_features,
                     VIRTIO_BALLOON_F_SG, true),
-    DEFINE_PROP_BIT("free-page-vq", VirtIOBalloon, host_features,
-                    VIRTIO_BALLOON_F_FREE_PAGE_VQ, true),
+    DEFINE_PROP_BIT("ctrlq", VirtIOBalloon, host_features,
+                    VIRTIO_BALLOON_F_CTRL_VQ, true),
     DEFINE_PROP_END_OF_LIST(),
 };
 
